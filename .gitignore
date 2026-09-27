@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+.trae/
+.workbuddy/
+*.swp
+*.swo
+
+# 编译缓存
+*.pyc
+*.pyd
+
+# 其他
+.DS_Store
+Thumbs.db
+*.log
+
+# 冗余资源（已删除，保留规则防止误加）
+downloaded_textures/
+_scratch/
+image.png
+image-1.png
+akina_1v1_track_backup.json

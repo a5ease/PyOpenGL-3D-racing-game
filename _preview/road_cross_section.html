@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>秋名山路面横截面（新增侧沟 / 标线）</title>
+<style>
+  :root{ --bg:#f7f7f5; --fg:#1c1c1a; --mut:#6b6b66; --line:#d8d8d2; --acc:#c0522d; }
+  *{box-sizing:border-box}
+  body{margin:0;padding:28px 32px;background:var(--bg);color:var(--fg);
+       font:14px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:12.5px;margin-bottom:22px}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:10px;
+         padding:14px 16px 6px;margin-bottom:20px}
+  h2{font-size:14px;margin:0 0 10px;color:var(--acc)}
+  .note{font-size:12px;color:var(--mut);margin:6px 0 10px}
+  table{border-collapse:collapse;font-size:12.5px;margin-top:4px}
+  th,td{border:1px solid var(--line);padding:4px 10px;text-align:left}
+  th{background:#f0f0ec;font-weight:600}
+  code{background:#efefe9;padding:1px 5px;border-radius:3px;font-size:12px}
+</style>
+</head>
+<body>
+<h1>秋名山路面横截面 — 本次新增元素（w = 7.0m）</h1>
+<div class="sub">垂直方向放大 10×。基准 = 地形压平带（plateau = <code>get_ground_height</code>），视觉路面 = plateau + 0.10</div>
+
+<div class="panel">
+<h2>横截面（右半幅）</h2>
+<svg viewBox="0 0 940 330" width="100%">
+  <!-- 网格/基准线 -->
+  <line x1="40" y1="250" x2="900" y2="250" stroke="#c9c9c2" stroke-dasharray="4 4"/>
+  <text x="42" y="266" font-size="11" fill="#8a8a82">地形压平带 plateau（基准 0.00）</text>
+  <!-- 沥青 -->
+  <rect x="40" y="230" width="245" height="20" fill="#33322f"/>
+  <text x="120" y="244" font-size="11" fill="#cfcfc8">沥青路面 +0.10</text>
+  <!-- 路缘石 红白 -->
+  <rect x="285" y="221" width="17" height="29" fill="#b23a2a"/>
+  <rect x="285" y="221" width="8" height="29" fill="#e6e4dd"/>
+  <!-- 侧沟 -->
+  <polygon points="302,250 302,204 311,204 311,236 349,236 349,204 358,204 358,247 382,247 382,262 302,262"
+           fill="#8d8b84" stroke="#5e5d58"/>
+  <rect x="311" y="236" width="38" height="14" fill="#2c2f2a"/>
+  <text x="316" y="246" font-size="9" fill="#9a9a92">沟腔</text>
+  <!-- 标注 -->
+  <g font-size="11" fill="#4a4a44">
+    <line x1="302" y1="196" x2="382" y2="196" stroke="#c0522d"/>
+    <text x="316" y="191" fill="#c0522d">侧沟 0.80m</text>
+    <line x1="311" y1="256" x2="349" y2="256" stroke="#c0522d"/>
+    <text x="317" y="276" fill="#c0522d">腔宽 0.42m</text>
+    <line x1="392" y1="204" x2="392" y2="250" stroke="#c0522d"/>
+    <text x="398" y="212" fill="#c0522d">唇 +0.22</text>
+    <line x1="366" y1="236" x2="366" y2="250" stroke="#2f6fb0"/>
+    <text x="372" y="230" fill="#2f6fb0">底 +0.08</text>
+  </g>
+  <!-- 地形 -->
+  <path d="M358 247 L382 262 L420 262 L900 262 L900 300 L40 300 L40 262 L302 262 Z"
+        fill="#cfcabb" stroke="#a9a498" opacity="0.55"/>
+  <text x="600" y="256" font-size="11" fill="#7d7a70">地形压平带（5m，网格 3.0m）</text>
+  <!-- 横向刻度 -->
+  <g font-size="10" fill="#8a8a82">
+    <text x="36" y="316">0（中心）</text>
+    <text x="270" y="316">2.45 沥青路缘</text>
+    <text x="296" y="316">2.66 沟内沿</text>
+    <text x="374" y="316">3.46 沟外沿</text>
+    <text x="392" y="316">3.5 棱柱外缘</text>
+  </g>
+</svg>
+<div class="note">
+  沟内沿定在 <b>0.38w</b>（=2.66m）是为了避让 0.36~0.375w 的红白路缘石。
+  沟腔换算到 <code>signed_distance</code> 是 <b>0.29~0.71</b>，落在空气墙（sd ≤ 0.9）之内 → 沟渠跑法可玩。
+</div>
+</div>
+
+<div class="panel">
+<h2>为什么侧沟"高出地面"而不是下凹</h2>
+<table>
+<tr><th>约束</th><th>后果</th></tr>
+<tr><td>地形压平带紧贴路面下方 0.10m 且连续</td><td>任何深于 0.10m 的下凹都会被地形填平</td></tr>
+<tr><td>赛道 AABB 1701×2021m</td><td>地形核心带分辨率被自动降级到 <b>3.0m</b>，0.8m 开槽只会被采成随机散坑（v25 试过已废弃）</td></tr>
+<tr><td><code>surface_height_at</code> 在棱柱边界有 0.15m 阶跃</td><td>基准高度必须查 <code>get_ground_height</code>，且在<b>沟腔内壁</b>处查（那里地形最高）</td></tr>
+</table>
+</div>
+
+<div class="panel">
+<h2>路面标线（俯视）</h2>
+<svg viewBox="0 0 940 200" width="100%">
+  <rect x="40" y="40" width="860" height="120" fill="#3a3936"/>
+  <!-- 边缘线 -->
+  <rect x="40" y="46" width="860" height="4" fill="#dcdcd4"/>
+  <rect x="40" y="150" width="860" height="4" fill="#dcdcd4"/>
+  <!-- 中央白破线 4m/6m（示意：每 100px 画 40px） -->
+  <g fill="#e8e6de">
+    <rect x="50"  y="96" width="40" height="7"/>
+    <rect x="150" y="96" width="40" height="7"/>
+    <rect x="250" y="96" width="40" height="7"/>
+    <rect x="530" y="96" width="40" height="7"/>
+    <rect x="630" y="96" width="40" height="7"/>
+    <rect x="730" y="96" width="40" height="7"/>
+  </g>
+  <!-- 急弯黄实线 -->
+  <rect x="330" y="95" width="150" height="9" fill="#d9b21c"/>
+  <text x="352" y="86" font-size="11" fill="#d9b21c">急弯段：黄实线（追越禁止）</text>
+  <!-- 减速标线 -->
+  <g fill="#e8e6de">
+    <rect x="60" y="55" width="9" height="90"/><rect x="80" y="55" width="9" height="90"/>
+    <rect x="150" y="55" width="9" height="90"/><rect x="170" y="55" width="9" height="90"/>
+    <rect x="240" y="55" width="9" height="90"/><rect x="260" y="55" width="9" height="90"/>
+  </g>
+  <text x="60" y="36" font-size="11" fill="#c0522d">入弯前 3 组横向减速标线</text>
+  <!-- 补丁 -->
+  <rect x="600" y="70" width="52" height="34" fill="#22221f"/>
+  <text x="600" y="64" font-size="10" fill="#9a9a92">沥青补丁</text>
+  <!-- 胎痕 -->
+  <rect x="410" y="118" width="110" height="6" fill="#151514"/>
+  <rect x="410" y="132" width="110" height="6" fill="#151514"/>
+  <text x="410" y="178" font-size="10" fill="#9a9a92">弯道外侧漂移胎痕</text>
+</svg>
+</div>
+
+<div class="panel">
+<h2>顶点数（实测）</h2>
+<table>
+<tr><th>构件</th><th>缓存名</th><th>顶点</th></tr>
+<tr><td>路肩 U 型侧沟</td><td><code>akina_ditches_v5</code></td><td>500,760</td></tr>
+<tr><td>路面标线 + 磨耗</td><td><code>akina_markings_v1</code></td><td>84,036</td></tr>
+<tr><td>百米里程标</td><td><code>akina_kiloposts_v1</code></td><td>4,158</td></tr>
+<tr><td>护栏（v5，含擦痕）</td><td><code>akina_guardrails_v5</code></td><td>1,892,268</td></tr>
+<tr><td>混凝土路障（v2，修判据后）</td><td><code>akina_barriers_v2</code></td><td>71,388（原为 0）</td></tr>
+<tr><td>标志牌（v3，加橙框 + 落石注意）</td><td><code>akina_signs_v3</code></td><td>30,744（112 处落石标志）</td></tr>
+<tr><td>挖方边坡格构护坡（法枠工）</td><td><code>akina_lattice_v2</code></td><td>185,472（1,035 框格）</td></tr>
+<tr><td>落石防护网（菱形金網）</td><td><code>akina_rocknet_v3</code></td><td>334,140（898 片网）</td></tr>
+</table>
+<div class="note">
+  <code>scene_batch</code> 现共 <b>10 个 subset</b>（上限 16），合计约 3.6M 顶点 ≈ 175MB VBO
+  （护栏独占 1.89M）。显存吃紧时优先砍落石防护网。
+</div>
+</div>
+
+<div class="panel">
+<h2>挖方边坡立面（法枠工 + 落石防护网）</h2>
+<svg viewBox="0 0 940 300" width="100%">
+  <!-- 路面 -->
+  <rect x="40" y="250" width="180" height="16" fill="#33322f"/>
+  <text x="60" y="263" font-size="10" fill="#cfcfc8">路面</text>
+  <!-- 挡土墙 -->
+  <rect x="220" y="222" width="16" height="44" fill="#6a6660"/>
+  <text x="222" y="216" font-size="10" fill="#7d7a70">挡土墙</text>
+  <!-- 边坡 -->
+  <polygon points="236,266 236,222 420,180 640,120 900,74 900,290 236,290"
+           fill="#cfcabb" stroke="#a9a498" opacity="0.5"/>
+  <!-- 格构护坡 坡脚外 0.5~3.5m -->
+  <g stroke="#8d8b84" stroke-width="5" fill="none">
+    <line x1="248" y1="258" x2="252" y2="256"/>
+    <path d="M246 258 L262 252 L288 244 L316 235"/>
+    <path d="M244 250 L272 240 L300 231 L328 222"/>
+    <line x1="316" y1="235" x2="330" y2="222"/>
+    <line x1="288" y1="244" x2="302" y2="231"/>
+  </g>
+  <text x="250" y="278" font-size="10" fill="#c0522d">格构护坡（法枠工）坡脚外 0.5~3.5m</text>
+  <!-- 落石网 坡脚外 4.0~7.5m -->
+  <g stroke="#4a4d48" stroke-width="1.6" fill="none">
+    <path d="M332 220 L352 188"/><path d="M348 216 L368 184"/>
+    <path d="M364 212 L384 180"/><path d="M380 208 L400 176"/>
+    <path d="M332 220 L366 186"/><path d="M348 216 L382 182"/>
+    <path d="M364 212 L398 178"/><path d="M380 208 L414 174"/>
+    <path d="M396 204 L430 170"/><path d="M412 200 L446 166"/>
+    <path d="M396 204 L432 172"/><path d="M412 200 L448 168"/>
+  </g>
+  <line x1="330" y1="222" x2="452" y2="164" stroke="#5e5d58" stroke-width="3"/>
+  <rect x="446" y="140" width="9" height="26" fill="#6a6e68"/>
+  <rect x="330" y="196" width="8" height="26" fill="#6a6e68"/>
+  <text x="420" y="140" font-size="10" fill="#c0522d">落石防护网 坡脚外 4.0~7.5m</text>
+  <text x="462" y="160" font-size="9" fill="#5a5a52">支柱</text>
+  <!-- 落石注意 -->
+  <g>
+    <rect x="150" y="196" width="4" height="54" fill="#6a6e68"/>
+    <polygon points="152,182 168,196 152,210 136,196" fill="#e8c81c" stroke="#22221f"/>
+    <polygon points="149,193 156,199 158,196 154,192 148,191" fill="#22221f"/>
+    <text x="176" y="200" font-size="10" fill="#c0522d">「落石注意」菱形牌</text>
+  </g>
+</svg>
+<div class="note">
+  ⚠️ 实测这条赛道 <code>cut_foot_sample</code> 的 rise <b>最大只有 1.26m</b>（坡很缓），
+  且发夹弯处 <code>signed_distance</code> 会选到另一条腿（高度跳 3m），
+  必须用 <code>_slope_leg_ok()</code> 剔除（格构护坡跳过了 23 处）。
+</div>
+</div>
+</body>
+</html>
