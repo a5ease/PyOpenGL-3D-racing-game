@@ -23,8 +23,8 @@ env/
 *.pyc
 *.pyd
 
-# PyInstaller 打包产物
-*.spec
+# 场景缓存（首次运行自动生成，不入库）
+.cache/
 
 # 其他
 .DS_Store

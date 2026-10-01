@@ -34,7 +34,7 @@ Realistic Haruna mountain pass racing simulation with PBR (Cook-Torrance) render
 
 ## 📸 截图
 
->![alt text](image.png)![alt text](image-1.png)
+>![alt text](assets/screenshots/image.png)![alt text](assets/screenshots/image-1.png)
 
 ## 🧰 技术栈
 
@@ -73,12 +73,16 @@ python main.py
 ├── dem_loader.py        # DEM 地形数据加载
 ├── pbr_loader.py        # PBR 纹理加载器
 ├── batch_renderer.py    # 批量离屏渲染工具
+├── requirements.txt     # 运行依赖清单
 ├── README.md
 ├── run_game.bat         # Windows 一键启动脚本
+├── build_release.bat    # Windows 一键打包脚本（PyInstaller）
+├── 动力滑行.spec         # PyInstaller 打包配置
+├── LICENSE
 ├── .gitignore
 ├── assets/textures/     # PBR 材质贴图（albedo/normal/roughness...）
-├── .cache/              # 场景缓存（首次运行自动生成）
-└── _scratch/            # 开发测试脚本（不影响运行时）
+├── assets/screenshots/  # 游戏截图
+└── .cache/              # 场景缓存（首次运行自动生成，不入库）
 ```
 
 ## 🎮 操作说明

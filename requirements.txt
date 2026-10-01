@@ -1,0 +1,12 @@
+# 动力滑行 运行依赖
+# 建议使用 Python 3.14（项目在当前版本下验证通过）
+#
+# 国内镜像安装：
+#   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+numpy>=1.26
+scipy>=1.13
+PyOpenGL>=3.1.7
+PyOpenGL_accelerate>=3.1.7
+PySDL2>=0.9.16
+Pillow>=10.0
