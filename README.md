@@ -1,6 +1,8 @@
 # 🏎️ 动力滑行
 
-**python + SDL2 + PyOpenGL 山路赛车游戏**
+**3D Mountain Racing Game** built with **Python + SDL2 + PyOpenGL**.
+
+Realistic Haruna mountain pass racing simulation with PBR (Cook-Torrance) rendering, advanced car physics (bicycle model + Pacejka tires), and drift-style cornering.
 
 基于榛名山真实地形的 3D 山路赛车模拟，使用 PBR Cook-Torrance 光照渲染，还原山路赛道场景与"沟渠跑法"物理。
 
@@ -14,6 +16,10 @@
 > 我在游玩《头文字D激斗》之后久久不能忘怀，并且因为学校周围没有街机厅，于是创造了此作品。
 
 > 使用的 AI 以及平台分别为：DeepSeek V4.1 Flash、GLM 5.3/5.3 Flash、Hy 4、TRAE CN、WorkBuddy
+
+**Keywords:** `racing-game` `mountain-racing` `3d-game` `python` `sdl2` `pyopengl` `opengl` `pbr-rendering` `car-physics` `drift` `simulation` `catmull-rom` `haruna`
+
+---
 
 ## 🎮 功能特性
 
