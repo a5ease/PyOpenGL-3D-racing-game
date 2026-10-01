@@ -23,6 +23,9 @@ env/
 *.pyc
 *.pyd
 
+# PyInstaller 打包产物
+*.spec
+
 # 其他
 .DS_Store
 Thumbs.db
