@@ -6,6 +6,8 @@ Realistic Haruna mountain pass racing simulation with PBR (Cook-Torrance) render
 
 基于榛名山真实地形的 3D 山路赛车模拟，使用 PBR Cook-Torrance 光照渲染，还原山路赛道场景与"沟渠跑法"物理。
 
+[![Release v1.0.1](https://img.shields.io/badge/Release-v1.0.1-brightgreen)](https://github.com/a5ease/PyOpenGL-3D-racing-game/releases/tag/v1.0.1)
+
 ---
 ## 📝 作者的话
 
@@ -96,6 +98,24 @@ python main.py
 | 滚轮 | 调节当前摄像机参数 |
 | ESC | 暂停 / 返回主菜单 |
 | F | 切换全屏 |
+
+## 🗂️ 发布历史
+
+### v1.0.0 · 首发版
+> 发布：首个可用版本。完成 PBR 渲染、车辆物理、榛名山赛道构建与完整 HUD，确立核心玩法与渲染管线。
+
+### v1.0.1 · 修复版
+> Release: [v1.0.1](https://github.com/a5ease/PyOpenGL-3D-racing-game/releases/tag/v1.0.1)
+
+**仓库整理与工程化**
+- 🌱 新增 `requirements.txt` 依赖清单，明确运行依赖并给出国内镜像安装方式
+- 🧷 使用 **Git LFS** 托管大型资产（PBR 贴图 / 车辆模型 / 地形数据），git 历史显著瘦身
+- 🧹 清理误入库的场景缓存 `.cache/`（首次运行自动重建）
+- 🖼️ 截图归位至 `assets/screenshots/`，并同步修正 README 引用
+- 📦 放行打包配置 `*.spec` 与 `build_release.bat`，保证打包流程可复现
+- 📝 新增 `LICENSE`（非商业用途），明确授权范围
+
+---
 
 ## ⚖️ 免责声明
 
