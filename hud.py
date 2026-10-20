@@ -198,6 +198,14 @@ class Minimap:
             # 屏幕正中心
             logical_x = (self._ui.logical_w - self.MM_SIZE) // 2
             logical_y = (self._ui.logical_h - self.MM_SIZE) // 2
+        elif self._pos == "top_right":
+            # ★ 右上角（默认改动：左上/左下被仪表盘与调试信息占用）
+            logical_x = self._ui.logical_w - self.MM_SIZE - self.MM_PAD
+            logical_y = self._ui.logical_h - self.MM_SIZE - self.MM_PAD
+            if logical_x < 0:
+                logical_x = self.MM_PAD
+            if logical_y < 0:
+                logical_y = self.MM_PAD
         else:
             # 默认：左上角
             logical_x = self.MM_PAD
@@ -213,6 +221,9 @@ class Minimap:
 
         # --- 构建赛道轮廓线 ---
         self._init_track_line()
+
+        # --- 起点/终点标记（导航：配合 T 键回起点重走下山路）---
+        self._init_endpoints()
 
         # --- 构建边框 + 角标 ---
         self._init_border()
@@ -274,6 +285,36 @@ class Minimap:
         glBindVertexArray(0)
         self._track_vbo = vbo
         self._track_count = len(self._track_path)
+
+    # ---- 初始化: 起点 / 终点标记 ----
+    def _init_endpoints(self):
+        """起点（绿，可 T 键一键返回）/ 终点（红）方块标记。
+        两个 quad 共 12 顶点，与赛道线共用同一着色器格式。"""
+        sp = self._track_path[0]
+        ep = self._track_path[-1]
+        cs = (self._mm_x_max - self._mm_x_min) * 0.016
+        green = (0.35, 1.0, 0.45, 0.95)
+        red = (1.0, 0.35, 0.30, 0.95)
+
+        def _quad(x, z, col):
+            return [[x - cs, z - cs, *col], [x + cs, z - cs, *col],
+                    [x + cs, z + cs, *col], [x - cs, z - cs, *col],
+                    [x + cs, z + cs, *col], [x - cs, z + cs, *col]]
+
+        verts = np.array(_quad(sp[0], sp[1], green) + _quad(ep[0], ep[1], red),
+                         dtype=f32)
+        stride = 6 * 4
+        self._ep_vao = glGenVertexArrays(1)
+        vbo = glGenBuffers(1)
+        glBindVertexArray(self._ep_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, verts.nbytes, verts, GL_STATIC_DRAW)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(8))
+        glEnableVertexAttribArray(1)
+        glBindVertexArray(0)
+        self._ep_vbo = vbo
 
     # ---- 初始化: 边框 + 四角色标 ----
     def _init_border(self):
@@ -409,6 +450,10 @@ class Minimap:
         glBindVertexArray(self._track_vao)
         glDrawArrays(GL_LINE_STRIP, 0, self._track_count)
 
+        # 绘制起点 / 终点标记
+        glBindVertexArray(self._ep_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 12)
+
         # 绘制边框 + 角标
         glBindVertexArray(self._border_vao)
         glDrawArrays(GL_TRIANGLES, 0, 36)
@@ -427,16 +472,249 @@ class Minimap:
     # ---- 清理资源 ----
     def destroy(self):
         """释放所有 OpenGL 资源（共享着色器由模块统一管理，不在此删除）"""
-        for vao in [self._bg_vao, self._track_vao,
+        for vao in [self._bg_vao, self._track_vao, self._ep_vao,
                     self._border_vao, self._player_vao]:
             glDeleteVertexArrays(1, [vao])
-        for vbo in [self._bg_vbo, self._track_vbo,
+        for vbo in [self._bg_vbo, self._track_vbo, self._ep_vbo,
                     self._border_vbo, self._player_vbo]:
             glDeleteBuffers(1, [vbo])
 
     # ---- 窗口尺寸更新 ----
     def resize(self, new_logical_w, new_logical_h, new_drawable_w, new_drawable_h):
         """窗口尺寸变化时重新计算定位"""
+        self._ui = UICoordSystem(new_logical_w, new_logical_h,
+                                 new_drawable_w, new_drawable_h)
+        self._recalc_position()
+
+
+# ============================================================
+# 旋转 GPS 地图 (RotatingGPS) —— 右上角，车头朝上
+# ============================================================
+
+def gps_project(pts_xz, car_x, car_z, yaw, rng):
+    """世界 xz → GPS 归一化坐标（车体系，车头朝上）。纯函数，可离线验证。
+
+    车体系约定（与 physics_car 一致）：
+        forward = (-sin(yaw), -cos(yaw))   → GPS 的 +y（屏幕上方）
+        right   = ( cos(yaw), -sin(yaw))   → GPS 的 +x（屏幕右方）
+    返回 (N,2) 数组，单位 = rng（视野半径）的倍数，中心为车位置。
+    """
+    dx = pts_xz[:, 0] - car_x
+    dz = pts_xz[:, 1] - car_z
+    s, c = math.sin(yaw), math.cos(yaw)
+    fwd = dx * (-s) + dz * (-c)
+    rgt = dx * c + dz * (-s)
+    return np.stack([rgt / rng, fwd / rng], axis=1).astype(f32)
+
+
+def _ribbon(pts, half_w, col):
+    """折线 → 条带三角形（GL 线宽在许多驱动上恒为 1px，粗线必须自己建几何）。
+
+    pts: (N,2)；返回 (6*(N-1), 6) 的 [x, y, r, g, b, a] 顶点数组。
+    ★ 一次分配 + 切片写入：旧版 np.stack/reshape/tile/concat 共 5 次数组分配，
+      640 段耗时 213µs（占 GPS 每帧开销 74%）；本实现 ~60µs。
+    """
+    n = len(pts)
+    if n < 2:
+        return np.zeros((0, 6), dtype=f32)
+    seg = pts[1:] - pts[:-1]
+    L = np.maximum(np.hypot(seg[:, 0], seg[:, 1]), 1e-9)
+    ux = seg[:, 0] / L
+    uy = seg[:, 1] / L
+    nx = -uy * half_w          # 段法线
+    ny = ux * half_w
+    ax, ay = pts[:-1, 0], pts[:-1, 1]
+    bx, by = pts[1:, 0], pts[1:, 1]
+
+    out = np.empty((n - 1, 6, 6), dtype=f32)
+    p = out[:, :, 0:2]
+    # 每段两个三角形：(a-n, b-n, b+n) 与 (a-n, b+n, a+n)
+    p[:, 0, 0] = ax - nx;  p[:, 0, 1] = ay - ny
+    p[:, 1, 0] = bx - nx;  p[:, 1, 1] = by - ny
+    p[:, 2, 0] = bx + nx;  p[:, 2, 1] = by + ny
+    p[:, 3, 0] = ax - nx;  p[:, 3, 1] = ay - ny
+    p[:, 4, 0] = bx + nx;  p[:, 4, 1] = by + ny
+    p[:, 5, 0] = ax + nx;  p[:, 5, 1] = ay + ny
+    out[:, :, 2] = col[0]
+    out[:, :, 3] = col[1]
+    out[:, :, 4] = col[2]
+    out[:, :, 5] = col[3]
+    return out.reshape(-1, 6)
+
+
+class RotatingGPS:
+    """
+    旋转 GPS 地图：车标固定在中心朝上，地图随车头旋转（真实车载 GPS 视图）。
+
+    与左上角 Minimap 的分工：
+      Minimap      = 全局全览，固定朝向，看"我在整条山的哪个位置"
+      RotatingGPS  = 局部导航，车头朝上，看"前方路线往哪拐、弯有多急"
+
+    ★ 赛道按**路径索引窗口**取点（不是空间距离）：发夹弯对面在空间上很近，
+      用距离筛选会把两臂连成一条直线；索引窗口保证画出来的是连续的行进路线。
+    """
+
+    GPS_SIZE = 180          # 逻辑像素
+    GPS_PAD = 12
+    GPS_RANGE = 160.0       # 视野半径（米）
+    GPS_STEP = 2            # ★ 路径抽稀（点距 0.5m → 1m）：160m 视野映射到 90px，
+                            #   1m ≈ 0.56px，0.5m 的折线细节在小地图上完全不可见
+    GPS_AHEAD = 230         # 前方路径点数（抽稀后 1m/点 → ~230m）
+    GPS_BEHIND = 90         # 后方
+    GPS_HALF_W = 0.028      # 赛道条带半宽（NDC）
+
+    def __init__(self, ui_coord, track_path, pos="top_right"):
+        self._ui = ui_coord
+        self._pos = pos
+        full = np.asarray([(p[0], p[1]) for p in track_path], dtype=np.float64)
+        self._path = full[::self.GPS_STEP]
+        self._n = len(self._path)
+        self._hud_prog, self._hud_uMVP = get_hud_program()
+        # NDC 正交投影：顶点直接是 -1..1
+        self._proj = _mat4_ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
+        self._recalc_position()
+        self._init_frame()      # 背景 + 边框（静态）
+        self._init_marker()     # 中心车标（静态，恒朝上）
+        self._init_track()      # 赛道条带（动态，每帧上传）
+
+    # ---- 屏幕定位 ----
+    def _recalc_position(self):
+        if self._pos == "top_left":
+            logical_x = self.GPS_PAD
+        else:
+            logical_x = self._ui.logical_w - self.GPS_SIZE - self.GPS_PAD
+        logical_y = self._ui.logical_h - self.GPS_SIZE - self.GPS_PAD
+        logical_x = max(self.GPS_PAD, logical_x)
+        logical_y = max(self.GPS_PAD, logical_y)
+        self._screen_x, self._screen_y, self._screen_w, self._screen_h = \
+            self._ui.to_drawable(logical_x, logical_y, self.GPS_SIZE, self.GPS_SIZE)
+
+    def _init_frame(self):
+        """背景方板 + 边框（NDC 静态几何）"""
+        bg = (0.04, 0.07, 0.10, 0.80)
+        bd = (0.55, 0.72, 0.80, 0.85)
+        e, t = 1.0, 1.0 - 0.045          # 外沿 / 边框内沿
+        verts = np.array([
+            [-e, -e, *bg], [e, -e, *bg], [e, e, *bg],
+            [-e, -e, *bg], [e, e, *bg], [-e, e, *bg],
+            # 四边边框
+            [-e, t, *bd], [e, t, *bd], [e, e, *bd],
+            [-e, t, *bd], [e, e, *bd], [-e, e, *bd],
+            [-e, -e, *bd], [e, -e, *bd], [e, -t, *bd],
+            [-e, -e, *bd], [e, -t, *bd], [-e, -t, *bd],
+            [-e, -e, *bd], [-t, -e, *bd], [-t, e, *bd],
+            [-e, -e, *bd], [-t, e, *bd], [-e, e, *bd],
+            [t, -e, *bd], [e, -e, *bd], [e, e, *bd],
+            [t, -e, *bd], [e, e, *bd], [t, e, *bd],
+        ], dtype=f32)
+        self._frame_vao, self._frame_vbo = self._make(verts, 36)
+
+    def _init_marker(self):
+        """中心车标：黄色三角，恒朝上（车头方向永远指向屏幕上方）"""
+        col = (1.0, 0.82, 0.25, 0.98)
+        tip = (0.0, 0.115)
+        lw, rw = (-0.055, -0.070), (0.055, -0.070)
+        verts = np.array([[*tip, *col], [*lw, *col], [*rw, *col]], dtype=f32)
+        self._marker_vao, self._marker_vbo = self._make(verts, 3, dynamic=False)
+
+    def _init_track(self):
+        self._track_vao, self._track_vbo = self._make(
+            np.zeros((6, 6), dtype=f32), 0, dynamic=True, size=6 * 900 * 6 * 4)
+        self._track_count = 0
+
+    @staticmethod
+    def _make(verts, count, dynamic=True, size=None):
+        vao = glGenVertexArrays(1)
+        vbo = glGenBuffers(1)
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        nbytes = verts.nbytes if size is None else size
+        glBufferData(GL_ARRAY_BUFFER, nbytes,
+                     verts if size is None else None,
+                     GL_DYNAMIC_DRAW if dynamic else GL_STATIC_DRAW)
+        stride = 6 * 4
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(8))
+        glEnableVertexAttribArray(1)
+        glBindVertexArray(0)
+        return vao, vbo
+
+    # ---- 每帧更新 ----
+    def update(self, car_x, car_z, car_yaw):
+        """按路径索引窗口取赛道点 → 车体系投影 → 条带几何上传"""
+        dx = self._path[:, 0] - car_x
+        dz = self._path[:, 1] - car_z
+        i0 = int(np.argmin(dx * dx + dz * dz))
+        lo = max(0, i0 - self.GPS_BEHIND)
+        hi = min(self._n, i0 + self.GPS_AHEAD)
+        if hi - lo < 2:
+            self._track_count = 0
+            return
+        seg = self._path[lo:hi]
+        pts = gps_project(seg, car_x, car_z, car_yaw, self.GPS_RANGE)
+        # 只保留视野附近（±1.35），但保持索引连续（不破坏 LINE/条带连续性）
+        keep = np.maximum(np.abs(pts[:, 0]), np.abs(pts[:, 1])) < 1.35
+        idx = np.where(keep)[0]
+        if len(idx) < 2:
+            self._track_count = 0
+            return
+        # 连续段（取第一段，避免远处折返被连起来）
+        brk = np.where(np.diff(idx) > 1)[0]
+        if len(brk):
+            idx = idx[:brk[0] + 1]
+        sub = pts[idx[0]:idx[-1] + 1]
+        # 前方段亮青、后方段暗灰：GPS 导航的"行进方向"语义
+        # ★ cut 必须是**相对 sub 起点**的索引：sub = pts[idx[0]:idx[-1]+1]，
+        #   而 i0 在 seg 中的下标是 (i0 - lo)。若直接用 searchsorted(idx, ...)
+        #   得到的 idx 数组位置，当视野裁剪掉窗口开头（idx[0] > 0）时
+        #   前后段分界会整体偏移几百个点。
+        cut = int(i0 - lo - idx[0])
+        cut = max(0, min(cut, len(sub) - 1))
+        col_a, col_b = (0.35, 0.95, 0.95, 0.95), (0.30, 0.42, 0.48, 0.75)
+        data = np.concatenate([
+            _ribbon(sub[:cut + 1], self.GPS_HALF_W, col_b),
+            _ribbon(sub[max(0, cut - 1):], self.GPS_HALF_W, col_a),
+        ]) if cut >= 1 else _ribbon(sub, self.GPS_HALF_W, col_a)
+        if data.size == 0:
+            self._track_count = 0
+            return
+        glBindBuffer(GL_ARRAY_BUFFER, self._track_vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, data.nbytes, data)
+        self._track_count = len(data)
+
+    # ---- 渲染 ----
+    def render(self):
+        glViewport(self._screen_x, self._screen_y, self._screen_w, self._screen_h)
+        # ★ 裁剪到 GPS 方框：条带会伸出视野，不裁剪会画到 HUD 其他区域
+        glEnable(GL_SCISSOR_TEST)
+        glScissor(self._screen_x, self._screen_y, self._screen_w, self._screen_h)
+
+        glUseProgram(self._hud_prog)
+        glUniformMatrix4fv(self._hud_uMVP, 1, GL_TRUE, self._proj)
+
+        glBindVertexArray(self._frame_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 36)
+
+        if self._track_count > 0:
+            glBindVertexArray(self._track_vao)
+            glDrawArrays(GL_TRIANGLES, 0, self._track_count)
+
+        glBindVertexArray(self._marker_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 3)
+
+        glDisable(GL_SCISSOR_TEST)
+        glViewport(0, 0, self._ui.drawable_w, self._ui.drawable_h)
+        glBindVertexArray(0)
+        glUseProgram(0)
+
+    def destroy(self):
+        for vao in [self._frame_vao, self._marker_vao, self._track_vao]:
+            glDeleteVertexArrays(1, [vao])
+        for vbo in [self._frame_vbo, self._marker_vbo, self._track_vbo]:
+            glDeleteBuffers(1, [vbo])
+
+    def resize(self, new_logical_w, new_logical_h, new_drawable_w, new_drawable_h):
         self._ui = UICoordSystem(new_logical_w, new_logical_h,
                                  new_drawable_w, new_drawable_h)
         self._recalc_position()
@@ -684,7 +962,10 @@ class TextRenderer:
 # 来源：Mazda RX-7 FD3S 6速手动变速箱典型值
 # 公式：RPM = speed_mps × 60 × 终传比 × 档位齿比 / 轮胎周长
 GEAR_RATIOS = {
-    "R": 3.483,   # 倒挡齿比（实际减速用绝对值）
+    # ★ 必须与 physics_car.EngineSimulator.GEAR_RATIOS['R'] 一致：倒挡显示
+    #   真正生效后（档位不再冻结成 N），这里算出的 RPM 会被转速表直接用，
+    #   两侧不一致会让倒车转速系统性偏高。
+    "R": 3.200,   # 倒挡齿比（实际减速用绝对值）
     "N": 0.0,
     "1": 3.483,
     "2": 2.015,

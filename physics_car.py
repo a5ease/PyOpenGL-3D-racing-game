@@ -220,6 +220,7 @@ class VehiclePhysics:
         # ---- 倒挡（街机式：停稳后按住刹车 0.4s 进入倒挡）----
         self.reverse_max_v = 8.0       # 倒车极速 m/s ≈ 29 km/h
         self.reverse_accel = 3500.0    # 倒车驱动力 N
+        self.reverse_brake = 8000.0    # 倒挡中踩油门的制动阻力 N（先刹停，再挂前进挡）
         self._brake_hold = 0.0         # 刹车持续计时（倒挡解锁钥匙）
         self._gear_reverse = False    # ★ 持久挡位：进倒挡后保持，踩油门才回前进挡
 
@@ -248,13 +249,37 @@ class VehiclePhysics:
         self.drift_decay_rate = 22.0
         self.drift_throttle_rate = 6.0
         self.drift_hb_rate = 22.0
-        self.drift_entry_deg = 12.0
+        # ★ 20°：入漂角上限（含手刹爆发角加成）。
+        #   旧版 12°；实测 _step 手刹滑移在入漂时刻仅 ~2.6°（hb_k 才 0.33），
+        #   所以真正决定入漂角的是兜底 8° + 手刹时长加成，不是继承滑移。
+        self.drift_entry_deg = 20.0
+        self.drift_hb_burst = 30.0  # 手刹时长 → 入漂角加成（°/s 的按住时长）
         self.drift_path_gain = 0.40   # 0.32→0.40
         self.drift_path_pull = 0.34   # 0.28→0.34：U 弯二次项增强
         self.drift_scrub_min = 0.03
         self.drift_scrub_max = 0.22
         self.drift_drive = 6.5
         self.drift_exit_deg = 6.0
+        # ---- v7 分级速度模型：漂移中油门的**净**纵向加速度预算 ----
+        #   ★ 旧版一律 `drive = min(drive, 0.8 * v * scrub)`：净加速度结构上
+        #     ≤ 0，所有漂移必然掉速 —— 头文字D 的下坡 power slide 是维持
+        #     甚至微加速的，小角度巡航漂也不该亏速。
+        #   ★ 第一版做成 `cap × scrub × v`（油门预算 ∝ 搓地损失）是错的：
+        #     角度越小 scrub 越小 → 预算越小，方向反了。实测真正压制小角度
+        #     的是风阻+滚阻（20m/s 约 0.34 m/s²），与 scrub 无关。
+        #     → 改成独立的净预算 net（m/s²）：允许油门吃完 scrub 后再净给。
+        self.drift_net_power = 0.45   # <15°：净 +0.45 m/s²（抵消风阻后仍微加速）
+        self.drift_net_deep_frac = 0.20  # >30°：在 scrub 之上再扣 20% 的减速
+        self.drift_power_frac = 15.0 / 52.0    # 小角度阈值（占最大角比例）
+        self.drift_mid_frac = 30.0 / 52.0
+        # ---- v7 棘轮：软上限 + 下坡重力豁免 ----
+        #   ★ 旧版 `min(v, vmax)` 硬截 + vmax 恒为入漂速度×1.05：
+        #     实测棘轮在 0/91 帧命中（scrub 先掉速），真正压制下坡增速的
+        #     是硬截本身 —— 一旦下坡真把速度顶过 vmax 就被瞬间削平。
+        self.drift_ratchet_k = 3.0    # 超出量衰减速率 1/s（时间常数 ~0.33s）
+        self.drift_downhill_g = 0.29  # 下坡豁免阈值 m/s²（≈ pitch < -0.03）
+        self.drift_road_gain = 0.30   # 路面曲率引导强度（kappa × speed × 本值）
+                                      # 发夹 R=12m @17m/s → ~24°/s 引导
         self._drift_on = False
         self._drift_sgn = 1.0
         self._drift_speed = 0.0
@@ -268,6 +293,21 @@ class VehiclePhysics:
         self._hb_k = 0.0               # ★ 手刹权重平滑状态（旧版一帧 0→1）
         self._drift_vmax = 0.0         # ★ 速度棘轮：本段漂移速度上限
         self._wall_stick = 0.0         # ★ 连续楔入护栏帧计数
+        # ---- 护栏短回弹（贴墙时给玩家一个可控的脱离窗口）----
+        #   ★ 需求：车贴护栏后"方向被锁死、不能变"。实测根因是压墙帧
+        #     `yaw_rate *= 0.5` 每帧削半（1.6s 只能转 11.8°，无墙对照 54°/2s）
+        #     + 位置每帧投影推回 + 刮擦持续减速。
+        #     解法：真撞上给一个**封顶的法向分离速度**，并打开短窗口，
+        #     窗口内不再削 yaw_rate、航向对齐大幅减弱 → 玩家能主动变向。
+        self.wall_bounce_restitution = 0.22   # 回弹系数（乘压出速度）
+        self.wall_bounce_max = 1.8      # 回弹速度上限 m/s（防弹飞）
+        self.wall_bounce_min_press = 0.8  # 触发阈值 m/s（轻蹭不弹，只减速）
+        self.wall_bounce_cool = 0.45    # 冷却 s（防持续贴墙反复弹跳）
+        self.wall_bounce_window = 0.25  # 回弹后的转向自由度窗口 s
+        self.wall_press_yaw_damp = 0.72  # 压墙帧的横摆削弱（旧版 0.5 = 每帧削半，
+                                         # 是"方向被锁死"的直接推手）
+        self._wall_bounce_t = 0.0       # 窗口剩余时间
+        self._wall_bounce_cd = 0.0      # 冷却剩余时间
 
         # ---- 低速/动力学混合 ----
         self.dyn_min_v = 1.0           # 低于此速度纯运动学
@@ -300,9 +340,11 @@ class VehiclePhysics:
         self._hb_k = 0.0
         self._drift_vmax = 0.0
         self._wall_stick = 0.0
+        self._wall_bounce_t = 0.0
+        self._wall_bounce_cd = 0.0
 
     def wall_collide(self, nx, nz, penetration, dt=1.0 / 60.0,
-                     restitution=0.0, scrape_decel=3.5, vn_decel=25.0):
+                     restitution=None, scrape_decel=3.5, vn_decel=25.0):
         """
         空气墙两侧其实没有竖直挡板：这里是路面→土路肩/排水沟的软边界。
 
@@ -315,8 +357,16 @@ class VehiclePhysics:
           1) 位置：硬投影回边界内（每帧做，无害）
           2) 法向：只做**减速**（vn_decel m/s²，∝ dt），绝不反向、不反弹
           3) 切向：刮擦减速 scrape_decel m/s²（∝ dt，与帧率无关）
+          4) ★ 短回弹（v2）：真撞上时给一个封顶的法向分离速度 + 转向自由度
+             窗口，让车能被"弹开一点"从而重新控制方向。与旧版反弹的关键区别：
+               - 只改**法向**分量，纵向/切向一律不动 → 不可能把车弹成倒车
+               - 分离速度封顶 1.8 m/s → 不会弹飞
+               - 带 0.45s 冷却 → 持续贴墙不会反复弹跳
+               - 只在 press ≥ 0.8 m/s 触发 → 轻蹭仍是纯减速
         返回压出速度（m/s），供上层判定"是否该交还抓地模型"。
         """
+        if restitution is None:
+            restitution = self.wall_bounce_restitution
         self.x -= nx * penetration
         self.z -= nz * penetration
 
@@ -329,7 +379,15 @@ class VehiclePhysics:
 
         press = vn if vn > 0.0 else 0.0     # 压出速度（只有它算"撞"）
         # 法向：吃掉压出分量，不产生反向速度（≤0 的分量原样保留 = 允许离墙）
-        if vn > 0.0:
+        # ★ 短回弹例外：真撞上且冷却结束 → 给一个封顶的分离速度。
+        #   只改 vn（法向），vt / v_long 的正负完全不受影响 —— 这是与旧版
+        #   "整条速度反向"反弹的根本区别，也是不会弹成倒车的保证。
+        if (restitution > 0.0 and press >= self.wall_bounce_min_press
+                and self._wall_bounce_cd <= 0.0):
+            vn = -min(press * restitution, self.wall_bounce_max)
+            self._wall_bounce_t = self.wall_bounce_window
+            self._wall_bounce_cd = self.wall_bounce_cool
+        elif vn > 0.0:
             vn = max(0.0, vn - vn_decel * dt)
 
         # 刮擦减速：∝ 压墙强度（滑动摩擦 ∝ 正压力），且 ∝ dt 与帧率无关。
@@ -344,8 +402,14 @@ class VehiclePhysics:
         self.v_long = -sy * vxw - cy * vzw
         self.v_lat  =  cy * vxw - sy * vzw
 
-        if press > 0.0:
-            self.yaw_rate *= 0.5            # ★ 只在真压出帧，不再每帧叠加
+        # ★ 回弹窗口内不削 yaw_rate：压墙帧每帧 *0.5 是"方向被锁死"的直接
+        #   推手（实测贴墙 1.6s 只能转 11.8°，无墙对照 54°/2s）。窗口内把
+        #   转向权交还玩家，车才有机会主动脱离护栏。
+        if press > 0.0 and self._wall_bounce_t <= 0.0:
+            # ★ 旧版 0.5 = 每帧削半：实测贴墙 1.6s 只能转 11.8°，
+            #   而无墙对照 54°/2s —— 这就是"贴着护栏方向变不了"的根因。
+            #   放宽到 0.72 仍抑制压墙时的打转，但把转向权交还玩家。
+            self.yaw_rate *= self.wall_press_yaw_damp
         # ★ 防卡死：连续楔入 0.3s 仍无新撞击 → 切向助推脱困
         if penetration > 0.15:
             self._wall_stick += dt
@@ -377,7 +441,10 @@ class VehiclePhysics:
             tx, tz = -tx, -tz
         target_yaw = math.atan2(-tx, -tz)      # forward=(-sin,-cos) 反解
         dyaw = (target_yaw - self.yaw + math.pi) % (2.0 * math.pi) - math.pi
-        self.yaw += _clamp(dyaw, -8.0 * dt, 8.0 * dt)   # 3→8 rad/s：0.1s 内完成对齐
+        # ★ 回弹窗口内把对齐速率砍到 1/4：原 8 rad/s(458°/s) 远大于玩家转向
+        #   能产生的 yaw_rate(~0.5 rad/s)，车头会被硬锁在沿墙方向。
+        _align = 2.0 if self._wall_bounce_t > 0.0 else 8.0
+        self.yaw += _clamp(dyaw, -_align * dt, _align * dt)
 
         cy, sy = math.cos(self.yaw), math.sin(self.yaw)
         vxw = -sy * self.v_long + cy * self.v_lat
@@ -474,13 +541,23 @@ class VehiclePhysics:
             self._drift_cooldown = 0.15    # 防同一面墙上立刻重新入漂
 
     def update(self, dt, throttle, brake, steer_in, handbrake=False,
-               surface_mu=1.0, pitch_slope=0.0):
-        """固定 120Hz 子步进，保证不同帧率下手感一致"""
+               surface_mu=1.0, pitch_slope=0.0, road_kappa=0.0):
+        """固定 120Hz 子步进，保证不同帧率下手感一致
+
+        road_kappa: 当前位置的赛道曲率（1/m，正 = 右弯）—— 由 main.py 每帧
+        用 track_bounds.road_curvature_at 查询后注入。物理层不直接依赖
+        corner_analyzer / mountain，保持纯数据与纯计算。
+        """
         t, step = 0.0, 1.0 / 120.0
         while t < dt - 1e-9:
             h = min(step, dt - t)
+            # ---- 护栏短回弹的窗口/冷却计时（与碰撞帧解耦，每子步都衰减）----
+            if self._wall_bounce_t > 0.0:
+                self._wall_bounce_t -= h
+            if self._wall_bounce_cd > 0.0:
+                self._wall_bounce_cd -= h
             if self._drift_update(h, throttle, brake, steer_in, handbrake,
-                                  surface_mu, pitch_slope):
+                                  surface_mu, pitch_slope, road_kappa):
                 # 漂移中：手动更新位置（_step 被跳过）
                 cy, sy = math.cos(self.yaw), math.sin(self.yaw)
                 vxw = -sy * self.v_long + cy * self.v_lat
@@ -501,9 +578,11 @@ class VehiclePhysics:
                                   - 0.28, 0.0, 1.0) - self.drift) * k
 
     # ---------------- IDAS 式漂移控制器 ----------------
-    def _drift_update(self, dt, throttle, brake, steer_in, handbrake, mu_s, pitch):
+    def _drift_update(self, dt, throttle, brake, steer_in, handbrake, mu_s, pitch,
+                      road_kappa=0.0):
         """按住积累版漂移控制器。返回 True = 本子步由漂移分支接管。
-        ★ 不变量：yaw ≡ _drift_vdir + _drift_ang。vdir 唯一积分，yaw 只推导。"""
+        ★ 不变量：yaw ≡ _drift_vdir + _drift_ang。vdir 唯一积分，yaw 只推导。
+        road_kappa: 当前位置赛道曲率（1/m，正 = 右弯），由 main.py 每帧注入。"""
         v, vl, r = self.v_long, self.v_lat, self.yaw_rate
         speed = math.hypot(v, vl)
         D2R = math.pi / 180.0
@@ -547,7 +626,14 @@ class VehiclePhysics:
                 ang = self._drift_ang
                 self.v_long = self._drift_speed * math.cos(ang)
                 self.v_lat = self._drift_speed * math.sin(ang)
-                self.yaw_rate = _clamp(self._drift_path_rate, -0.6, 0.6)
+                # ★ v7：继承漂移最后帧的真实横摆 _drift_spin，而不是 path_rate。
+                #   旧版写 _drift_path_rate：实测退出瞬间 70°/s → −20°/s，
+                #   突变 90°/s 且**符号翻转** = "啪"地贴地 + 车尾反向抽一下。
+                #   ⚠️ 限幅必须宽松：反打收线时 d_ang 可达 −110°/s，
+                #   _drift_spin 实测 −143°/s 是**真实物理**（车头正快速回摆）。
+                #   收紧到 ±1.0 rad/s 反而自己制造 86°/s 的跳变。
+                #   交给 _step 的一阶跟踪（8/s）平滑拉回 = 车尾晃两下再稳住。
+                self.yaw_rate = _clamp(self._drift_spin, -2.5, 2.5)
                 self.slip_rear = -ang
                 self.steer = 0.0                    # ★ 清掉漂移前的残留舵角
                 self._drift_on = False
@@ -577,6 +663,14 @@ class VehiclePhysics:
                 d0 = steer_in if steer_in != 0.0 else \
                      (1.0 if self.yaw_rate >= 0.0 else -1.0)
                 slide = math.copysign(math.radians(8.0), d0)   # 15→8
+            # ★ v7 手刹爆发角：按得越久入漂角越大（"拉得越狠甩得越猛"）。
+            #   实测手刹电平触发（hb_hold≈0.1s）时 _hb_k 只涨到 0.33，
+            #   _step 造出的真实滑移仅 ~2.6° —— 所谓"继承手刹动量"根本没有
+            #   动量可继承（旧提案的前提不成立），入漂角实际由 8° 兜底起步，
+            #   再以 32°/s 加深 → 到 30° 要 0.6s = "拉了手刹车还在犹豫"的真因。
+            burst = min(self._hb_hold, 0.45) * self.drift_hb_burst * D2R
+            a0 = min(abs(slide) + burst, math.radians(self.drift_entry_deg))
+            slide = math.copysign(a0, slide if slide != 0.0 else 1.0)
             slide = _clamp(slide, -math.radians(self.drift_max_deg),
                            math.radians(self.drift_max_deg))
             self._drift_ang = slide
@@ -629,6 +723,12 @@ class VehiclePhysics:
         fn = a_abs / math.radians(self.drift_max_deg)
         omega_path = (steer_in * self.drift_path_gain
                       + sgn * self.drift_path_pull * fn * (1.0 + 1.2 * fn)) * sp_f
+        # ★ v7 路面引导：赛道曲率自然"兜"住车，玩家舵角打得不够完美也不会
+        #   直接冲出弯外。量纲必须正确：kappa[1/m] × speed[m/s] = rad/s
+        #   （旧提案 `omega += kappa * 0.15` 是 1/m，量纲错，量级也无效：
+        #    R=30m 发夹只给 0.005 rad/s）。右弯 kappa>0 → yaw 减少 → 取负号。
+        if road_kappa != 0.0:
+            omega_path += -road_kappa * speed * self.drift_road_gain
         self._drift_vdir += omega_path * dt
         self._drift_path_rate = omega_path          # ★ 退出时用
 
@@ -646,9 +746,17 @@ class VehiclePhysics:
         if throttle > 0.0:
             drive = self.drift_drive * max(0.0, 1.0 - self._drift_speed / self.engine_fade_v)
             drive *= (1.0 - 0.55 * frac)          # 摩擦圆：滑移越大纵向驱动越弱
-            # ★ 定律②：漂移永远减速。油门最多把 scrub 抵消到 80%，
-            #   净加速度结构上 ≤ 0（旧版小角度时 6.5 > 3%×v，净加速）
-            drive = min(drive, 0.8 * self._drift_speed * scrub)
+            # ★ v7 分级净预算（替代旧版"永远减速"的 0.8 一刀切）：
+            #   小角度 power slide 净加速（藤原拓海下坡漂移是维持/微加速），
+            #   中角度中性，大角度严格减速。净加速量仍受 drive 自身
+            #   （引擎出力/摩擦圆）约束，不会变成漂移弹射。
+            if frac < self.drift_power_frac:
+                net = self.drift_net_power
+            elif frac < self.drift_mid_frac:
+                net = 0.0
+            else:
+                net = -self.drift_net_deep_frac * self._drift_speed * scrub
+            drive = min(drive, self._drift_speed * scrub + net)
             self._drift_speed += throttle * drive * dt
 
         if brake > 0.0:
@@ -663,8 +771,17 @@ class VehiclePhysics:
         self._drift_speed -= (self.drag * self._drift_speed * abs(self._drift_speed)
                               + self.rolling_res * self._drift_speed) / self.mass * dt
         self._drift_speed = _clamp(self._drift_speed, 0.0, 60.0)
-        # ★ 棘轮：任何情况下不允许超过本段漂移的速度峰值
-        self._drift_speed = min(self._drift_speed, self._drift_vmax)
+        # ★ v7 棘轮：软上限 + 下坡重力豁免。
+        #   旧版 min(v, vmax) 硬截：下坡重力顶上来的速度被一帧削平，
+        #   上坡/下坡漂移速度完全一样（实测）。
+        #   ① 下坡豁免：坡度带来的重力分量超阈值 → vmax 随速度抬升，
+        #      势能真转化为速度（棘轮仍保留防"漂移凭空加速"的本职）。
+        if -9.81 * pitch > self.drift_downhill_g:
+            self._drift_vmax = max(self._drift_vmax, self._drift_speed)
+        #   ② 软上限：超出部分按时间常数衰减，而非一帧截平
+        if self._drift_speed > self._drift_vmax:
+            self._drift_speed -= ((self._drift_speed - self._drift_vmax)
+                                  * self.drift_ratchet_k * dt)
 
         # ====== 写回导出（yaw 永远推导，绝不独立积分）======
         self._drift_ang = ang
@@ -755,7 +872,15 @@ class VehiclePhysics:
         Fx_total = 0.0
 
         # 引擎模拟器（含档位自动计算、发动机制动反馈）
-        gear = self.engine._calc_gear(v, throttle) if not in_reverse else 'R'
+        # ⚠️ 旧写法 `_calc_gear(...) if not in_reverse else 'R'` 在倒车时**跳过**
+        #   _calc_gear，而它是唯一写 self.engine.gear 的地方 ⇒ HUD 读到的档位
+        #   （main.py 直接取 phys.engine.gear）冻结在进倒挡前的 'N'，退出倒挡后
+        #   才因为 v<-0.5 闪一次 R —— 显示与实际完全错位。
+        #   → 照常调用以保持内部换挡迟滞状态连续，再覆盖对外档位。
+        gear = self.engine._calc_gear(v, throttle)
+        if in_reverse:
+            self.engine.gear = 'R'
+            gear = 'R'
         eng_force = self.engine.step(dt, throttle, gear, v)
         Fx_total += eng_force
 
@@ -768,6 +893,13 @@ class VehiclePhysics:
                 Fx_total += brake * 2500.0
             else:
                 Fx_total -= 4000.0
+        # ---- 倒挡中踩油门：只施加制动，停稳后才由 _gear_reverse 挂回前进挡 ----
+        #   ⚠️ 旧代码这里什么都不做：gear=='R' 时 engine.step 第 170 行的
+        #   `gear != 'R'` 把轮上力强制清零，车既无前进驱动力也无制动力，只剩
+        #   滚阻 —— 实测 -3.4 m/s 踩满油门 6 秒只衰减到 -3.1，还在继续后退。
+        #   brake>0 时 throttle 已被置 0（本函数开头），故此分支互不干扰。
+        if gear == 'R' and throttle > 0.0 and brake <= 0.0:
+            Fx_total += throttle * self.reverse_brake
         if handbrake and not in_reverse:
             # ★ 1300·v 让它在中低速也有足够咬合；11000N 上限 = 8.8 m/s²
             Fx_total -= _clamp(v * 1300.0, -self.handbrake_lock, self.handbrake_lock)

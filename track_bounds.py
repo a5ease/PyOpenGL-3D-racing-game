@@ -163,23 +163,26 @@ def _clean_stale_geometry_caches(base, keep_name):
 # 段投影 + 段内线性插值（与视觉三角形插值同构）—— v2 核心修复
 # ============================================================
 
+def _ensure_kdtree():
+    """惰性构建 KDTree（只一次）。单点/批量查询共用，避免两份构建逻辑漂移。"""
+    global _KD_TREE
+    if _KD_TREE is None:
+        try:
+            from scipy.spatial import cKDTree
+            _KD_TREE = cKDTree(_TRACK_POINTS)
+            print(f"[track_bounds] KDTree 已构建 ({len(_TRACK_POINTS)} 路径点)")
+        except ImportError:
+            _KD_TREE = False
+
+
 def _project_nearest_segment(x, z, window=2):
     """
     在最近路径点附近的局部窗口内做"点到线段"投影。
     v3：使用 cKDTree 缓存，从 O(M) 线性搜索降为 O(log M)。
     """
-    global _KD_TREE
+    _ensure_kdtree()
     pts = _TRACK_POINTS
     M = len(pts)
-
-    # 惰性构建 KDTree（只一次）
-    if _KD_TREE is None:
-        try:
-            from scipy.spatial import cKDTree
-            _KD_TREE = cKDTree(pts)
-            print(f"[track_bounds] KDTree 已构建 ({M} 路径点)")
-        except ImportError:
-            _KD_TREE = False
 
     if _KD_TREE is not False:
         _, idx = _KD_TREE.query([x, z])
@@ -253,9 +256,125 @@ def nearest_track_info(x, z):
     return i, hw, nx, nz, lateral, y
 
 
+def signed_distance_batch(points):
+    """多点批量有符号距离：单次 KDTree 批量查询 + 向量化窗口投影。
+
+    points: (K,2) 数组或 [(x,z), ...]；返回 np.ndarray (K,)，
+    逐点语义与 signed_distance 完全一致（abs(lateral) - hw）。
+
+    ★ 物理帧每帧 6 探针（四角 + 车身中点补漏 + 车头楔入）：逐点调用 =
+      6 次 Python↔C 往返 + 6 次 _ensure_data + 穿透时最多 5 次 _wall_normal
+      梯度（每次 4 个 sd）。批量把 KDTree 往返压成 1 次。
+    """
+    _ensure_data()
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim == 1:
+        pts = pts[None, :]
+    K = len(pts)
+    M = len(_TRACK_POINTS)
+
+    # ---- 1) 最近路径点：一次批量查询（惰性构建与单点版共用）----
+    _ensure_kdtree()
+    if _KD_TREE is not False:
+        _, idxs = _KD_TREE.query(pts)
+        idxs = np.atleast_1d(np.asarray(idxs)).astype(np.int64)
+    else:
+        idxs = np.empty(K, dtype=np.int64)
+        for k in range(K):
+            dx = _TRACK_POINTS[:, 0] - pts[k, 0]
+            dz = _TRACK_POINTS[:, 1] - pts[k, 1]
+            idxs[k] = int(np.argmin(dx * dx + dz * dz))
+
+    # ---- 2) 局部窗口点-线段投影，(K, S) 全向量化 ----
+    # ★ 窗口 -2..+1（4 段）必须与单点版 _project_nearest_segment 完全一致：
+    #   多扫一段会在段交界处选出不同 best 段，sd 出现 ~2e-5 分歧 ——
+    #   物理上无影响，但"单点说撞/批量说不撞"的边界分歧会变成调试噩梦。
+    rows = np.clip(idxs[:, None] + np.arange(-2, 2)[None, :], 0, M - 2)
+    # ★ _TRACK_POINTS 是 float32：必须先升 float64 再做段向量运算，
+    #   否则减法在 float32 内舍入（相对误差 ~1e-7，2150m 处 sd 差 2e-4），
+    #   与单点版（逐分量 float() 后 float64 运算）结果分叉。
+    A = _TRACK_POINTS[rows].astype(np.float64)     # (K, S, 2)
+    E = _TRACK_POINTS[rows + 1].astype(np.float64) - A
+    L2 = np.maximum((E * E).sum(axis=2), 1e-12)
+    rel = pts[:, None, :] - A
+    t = np.clip((rel * E).sum(axis=2) / L2, 0.0, 1.0)
+    P = A + E * t[:, :, None]                      # 段上最近点
+    d2 = ((pts[:, None, :] - P) ** 2).sum(axis=2)
+    ar = np.arange(K)
+    # ⚠️ 已知浮点分歧（实测，不修）：cKDTree 单点/批量 query 走不同遍历路径，
+    #   点恰在两路径点垂直平分面时返回不同 idx → 窗口错位 → sd 分歧。
+    #   赛道附近实测 max ~2e-5 m（0.02mm），碰撞判定精度 0.25m 墙距，无影响；
+    #   远离赛道（>2km）的随机点可达 ~1m，但物理探针永远不会在那里。
+    best = d2.argmin(axis=1)
+    bi = rows[ar, best]                            # 最佳段索引 (K,)
+    bt = t[ar, best]
+    bp = P[ar, best]
+
+    # ---- 3) 侧向距离 + 半宽插值（与 signed_distance 完全同式）----
+    # ★ 法线用 best 段向量 Eb（已是 float64），禁止再从 float32 数组做减法
+    Eb = E[ar, best]                               # (K, 2)
+    Lb = np.maximum(np.hypot(Eb[:, 0], Eb[:, 1]), 1e-10)
+    lateral = (pts[:, 0] - bp[:, 0]) * (-Eb[:, 1] / Lb) \
+            + (pts[:, 1] - bp[:, 1]) * (Eb[:, 0] / Lb)
+    hw = _TRACK_HALFWIDTHS[bi] * (1.0 - bt) + _TRACK_HALFWIDTHS[bi + 1] * bt
+    return np.abs(lateral) - hw
+
+
 def is_safe(x, z, margin=0.0):
     """检查点是否安全（赛道外且距离边缘 >= margin）"""
     return signed_distance(x, z) >= margin
+
+
+# ============================================================
+# 道路曲率查询（漂移路面引导用）
+# ============================================================
+_ROAD_KAPPA = None
+
+
+def _build_road_curvature():
+    """逐点道路曲率（1/m），**正 = 右弯**，与 corner_analyzer._curvature_2d 同式。
+
+    ★ 不复用 CornerAnalyzer：它的 _nearest_point 是全量 python 循环
+      （n≈15711，实测毫秒级），不适合每帧查询；这里走 KDTree O(log M)。
+      曲率为逐点噪声敏感量（GPS 密簇），5 点移动平均平滑。
+    """
+    global _ROAD_KAPPA
+    if _ROAD_KAPPA is not None:
+        return _ROAD_KAPPA
+    from mountain import get_akina_path
+    p = get_akina_path()
+    n = len(p)
+    k = np.zeros(n, dtype=np.float64)
+    for i in range(1, n - 1):
+        dx0 = p[i][0] - p[i - 1][0]
+        dz0 = p[i][1] - p[i - 1][1]
+        dx1 = p[i + 1][0] - p[i][0]
+        dz1 = p[i + 1][1] - p[i][1]
+        s0 = math.hypot(dx0, dz0)
+        s1 = math.hypot(dx1, dz1)
+        if s0 < 0.01 or s1 < 0.01:
+            continue
+        da = math.atan2(dz1, dx1) - math.atan2(dz0, dx0)
+        while da > math.pi:
+            da -= 2.0 * math.pi
+        while da < -math.pi:
+            da += 2.0 * math.pi
+        k[i] = da / (0.5 * (s0 + s1))
+    if n >= 2:
+        k[0], k[-1] = k[1], k[-2]
+    _ROAD_KAPPA = np.convolve(k, np.ones(5) / 5.0, mode='same')
+    return _ROAD_KAPPA
+
+
+def road_curvature_at(x, z):
+    """(x,z) 处赛道曲率（1/m，正 = 右弯）。KDTree 单点查询，~20µs。"""
+    _ensure_data()
+    kappa = _build_road_curvature()
+    _ensure_kdtree()
+    if _KD_TREE is not False:
+        _, idx = _KD_TREE.query([x, z])
+        return float(kappa[int(idx)])
+    return float(kappa[_project_nearest_segment(x, z)[0]])
 
 
 # ============================================================
@@ -1242,6 +1361,8 @@ def gpu_height_query_batch(points):
 # ============================================================
 __all__ = [
     "signed_distance",
+    "signed_distance_batch",
+    "road_curvature_at",
     "is_safe",
     "nearest_track_info",
     "surface_height_at",

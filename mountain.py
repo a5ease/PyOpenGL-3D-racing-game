@@ -2236,15 +2236,25 @@ def _venue_rail_gap(px, pz):
 
 def build_guardrails():
     """护栏：W-beam 连续护栏 — 已缓存（缓存名挂 path 指纹）"""
-    return _build_or_load_env("akina_guardrails_v7", _build_guardrails_impl)
+    return _build_or_load_env("akina_guardrails_v8", _build_guardrails_impl)
 
 def _build_guardrails_impl():
     """
-    W-beam 连续护栏 v5。
-    ★ v5 关键修复：1:1 真实赛道的 banking 实测仅 ±0.6°（不是设计稿的 ±14°），
-      原判据 |bank|>4° 恒假 → **弯道轮廓标一个都没生成**。改用曲率判据。
-    v5 新增：弯道护栏的轮胎擦痕（现实榛名山护栏上满是车身刮痕）。
-    观感：W 波形横梁、立柱加密、弯道轮廓标右白左黄、擦痕、端头处理。
+    W-beam 连续护栏 v6（几何瘦身版，v5 见 git 历史）。
+    ★ v6：1.9M 顶点 → ~0.4M。四个杠杆（按贡献排序）：
+      1. 动态立柱间距：v5 是全线 1m/柱（31286 根，密度 4 倍于真实护栏）。
+         直道 4m/柱、弯道 2m/柱（真实 W-beam 标准就是 4m 段两柱）。
+         lookahead 8 点探测，进弯前提前加密、出弯后才放宽。
+      2. 每段只画首柱：v5 每段画首末两柱，相邻段共享点 → 末柱与下段首柱
+         重复计费。改单柱 + 连续段结束时补末柱（豁口边界/路径末端）。
+      3. 柱底阴影 6 tri 六边形扇 → 1 quad：0.08m 半径的贴地假阴影，
+         六边形圆化在视觉上毫无意义。
+      4. 直道横梁 5 点 W 截面 → 3 点平截面：W 波纹只在弯道有辨识度，
+         直道双梁拉平每段省 24 顶点。
+    ★ v5 关键修复（保留）：1:1 真实赛道的 banking 实测仅 ±0.6°（不是设计稿的
+      ±14°），原判据 |bank|>4° 恒假 → **弯道轮廓标一个都没生成**。改用曲率判据。
+    v5 遗产：弯道护栏的轮胎擦痕（现实榛名山护栏上满是车身刮痕）。
+    观感：W 波形横梁、弯道立柱加密、弯道轮廓标右白左黄、擦痕、端头处理。
     """
     path, tangents = get_akina_path(return_tangents=True)[:2]
     n = len(path)
@@ -2273,6 +2283,44 @@ def _build_guardrails_impl():
 
     # ★ 曲率判据（banking 在这条真实赛道上只有 ±0.6°，不能用来判弯道）
     curv = _compute_path_curvature_signed(path)
+
+    # ---- v6 立柱间距判据：直道 4m / 弯道 2m ----
+    def _seg_curved(i):
+        """i 起始的段是否处于弯道：lookahead 8 点（~4m），
+        进弯前提前加密；出弯后（窗口内无弯）才放宽到 4m。"""
+        k = min(8, n - 1 - i)
+        return bool(np.abs(curv[i:i + k + 1]).max() > 0.005)
+
+    def _post(px, pz, py, rx=0.0, rz=0.0, end_off=0.0, end_drop=0.0):
+        """单根立柱 + 柱底阴影。端头处沿 (rx,rz) 外偏 end_off / 下探 end_drop。
+        v6：阴影从 6 tri 六边形扇降为 1 quad（0.08m 贴地假阴影圆化无意义）。"""
+        px_o = px + rx * end_off
+        pz_o = pz + rz * end_off
+        py_o = py - end_drop
+        hw2_p = 0.04
+        hh = GH * 0.5
+        quad((px_o - hw2_p, py_o, pz_o - hw2_p),
+             (px_o + hw2_p, py_o, pz_o - hw2_p),
+             (px_o + hw2_p, py_o + hh, pz_o - hw2_p),
+             (px_o - hw2_p, py_o + hh, pz_o - hw2_p),
+             (0, 0, 1), [(0,0)]*4, POST)
+        quad((px_o - hw2_p, py_o + hh, pz_o - hw2_p),
+             (px_o + hw2_p, py_o + hh, pz_o - hw2_p),
+             (px_o + hw2_p, py_o + hh, pz_o + hw2_p),
+             (px_o - hw2_p, py_o + hh, pz_o + hw2_p),
+             (0, 1, 0), [(0,0)]*4, POST_TOP)
+        quad((px_o - hw2_p, py_o, pz_o + hw2_p),
+             (px_o + hw2_p, py_o, pz_o + hw2_p),
+             (px_o + hw2_p, py_o + hh, pz_o + hw2_p),
+             (px_o - hw2_p, py_o + hh, pz_o + hw2_p),
+             (0, 0, -1), [(0,0)]*4, POST)
+        # 柱底接触阴影
+        sr = 0.07
+        quad((px_o - sr, py_o + 0.005, pz_o - sr),
+             (px_o + sr, py_o + 0.005, pz_o - sr),
+             (px_o + sr, py_o + 0.005, pz_o + sr),
+             (px_o - sr, py_o + 0.005, pz_o + sr),
+             (0, 1, 0), [(0,0)]*4, (0.0, 0.0, 0.0))
 
     def _dsquad(p1, p2, p3, p4, nn, c):
         """双面 quad：竖直薄片无法保证绕序，正反都发一份。"""
@@ -2324,9 +2372,14 @@ def _build_guardrails_impl():
     # 分别处理左侧和右侧护栏
     for side_name, sign in [("左侧", 1.0), ("右侧", -1.0)]:
         prev_valid = False  # 跟踪连续段，用于端头处理
-        first_i = None
-        for i in range(0, n - 1, 2):  # 立柱加密：步长 3→2（约 2m 一柱）
-            j = min(i + 1, n - 1)
+        seg_k = 0           # 段计数（擦痕/轮廓标节奏用）
+        last_end = None     # 本连续段最后一个末点 (sx,sz,sy,rx,rz)，补末柱用
+        i = 0
+        while i < n - 1:
+            # ---- v6 段长：直道 4m（步长8）/ 弯道 2m（步长4），lookahead 自动过渡 ----
+            curved = _seg_curved(i)
+            step = 4 if curved else 8
+            j = min(i + step, n - 1)
 
             # 提取中心点数据和切线（★ 修复 B：使用平滑切线 _tan_sm）
             cx1, cz1, cy1, w1, bank1 = path[i]
@@ -2356,6 +2409,7 @@ def _build_guardrails_impl():
             length = math.hypot(dx, dz)
             if length < 0.001:
                 prev_valid = False
+                i += 2
                 continue
 
             rx1 = nx1_2d * sign; rz1 = nz1_2d * sign
@@ -2370,7 +2424,13 @@ def _build_guardrails_impl():
             # ★ 起终点引道豁口：护栏在场地入口处整段断开
             #   （段长 ~20m，豁口比引道宽是真实的"开口渐变段"造型）
             if _venue_rail_gap(0.5 * (sx1 + sx2), 0.5 * (sz1 + sz2)):
+                # v6：护栏在此截断 —— 补上本连续段的末柱
+                #   （v5 每段画双柱，末柱由段自身天然覆盖；改单柱后须显式补）
+                if prev_valid and last_end is not None:
+                    _post(last_end[0], last_end[1], last_end[2])
                 prev_valid = False
+                last_end = None
+                i += 4          # gap 内保守步进（~2m），探出豁口为止
                 continue
 
             # ---- 端头处理：段起始处外张 ----
@@ -2378,64 +2438,39 @@ def _build_guardrails_impl():
             end_drop = 0.0
             if not prev_valid:
                 # 段起点：立柱外偏 0.6m，横梁下探 0.3m
-                first_i = i
                 end_offset = 0.6
                 end_drop = 0.3
-            # 段终点在下一轮判断（无法提前知道），在循环外补
 
-            # ---- 立柱（含端头外偏）----
-            for idx, (px, pz, py) in enumerate([(sx1, sz1, sy1), (sx2, sz2, sy2)]):
-                offset_i = end_offset if idx == 0 else 0.0
-                px_o = px + rx1 * offset_i
-                pz_o = pz + rz1 * offset_i
-                py_o = py - end_drop if idx == 0 else py
+            # ---- v6 立柱：每段只画首柱（v5 双柱使相邻段共享点重复计费），
+            #      连续段的末柱由 gap 截断/路径收尾处统一补 ----
+            _post(sx1, sz1, sy1, rx1, rz1, end_offset, end_drop)
+            last_end = (sx2, sz2, sy2, rx2, rz2)
 
-                hw2_p = 0.04
-                hh = GH * 0.5
-                quad((px_o - hw2_p, py_o, pz_o - hw2_p),
-                     (px_o + hw2_p, py_o, pz_o - hw2_p),
-                     (px_o + hw2_p, py_o + hh, pz_o - hw2_p),
-                     (px_o - hw2_p, py_o + hh, pz_o - hw2_p),
-                     (0, 0, 1), [(0,0)]*4, POST)
-                quad((px_o - hw2_p, py_o + hh, pz_o - hw2_p),
-                     (px_o + hw2_p, py_o + hh, pz_o - hw2_p),
-                     (px_o + hw2_p, py_o + hh, pz_o + hw2_p),
-                     (px_o - hw2_p, py_o + hh, pz_o + hw2_p),
-                     (0, 1, 0), [(0,0)]*4, POST_TOP)
-                quad((px_o - hw2_p, py_o, pz_o + hw2_p),
-                     (px_o + hw2_p, py_o, pz_o + hw2_p),
-                     (px_o + hw2_p, py_o + hh, pz_o + hw2_p),
-                     (px_o - hw2_p, py_o + hh, pz_o + hw2_p),
-                     (0, 0, -1), [(0,0)]*4, POST)
-
-                # ---- 柱底接触阴影 ----
-                sr = 0.08
-                for s in range(6):
-                    a1 = 2*math.pi*s/6
-                    a2 = 2*math.pi*(s+1)/6
-                    tri((px_o, py_o+0.005, pz_o),
-                        (px_o+sr*math.cos(a1), py_o+0.005, pz_o+sr*math.sin(a1)),
-                        (px_o+sr*math.cos(a2), py_o+0.005, pz_o+sr*math.sin(a2)),
-                        (0,1,0), [(0,0)]*3, (0.0,0.0,0.0))
-
-            # ---- W 波形横梁（5 点折线，中央内凹的 W 谷）----
+            # ---- W 波形横梁：弯道 5 点折线（中央内凹 W 谷）/ 直道 3 点平截面 ----
             for y_off, rail_col in [(GH * 0.28, RAIL_LOWER), (GH * 0.72, RAIL_UPPER)]:
                 mx1, mz1 = (sx1 + sx2) * 0.5, (sz1 + sz2) * 0.5
-                avg_rx = (rx1 + rx2) * 0.5
-                avg_rz = (rz1 + rz2) * 0.5
-                # 1/4 与 3/4 点折出 W 谷
-                qx1 = sx1 + (mx1 - sx1) * 0.5 - avg_rx * 0.035
-                qz1 = sz1 + (mz1 - sz1) * 0.5 - avg_rz * 0.035
-                qx2 = sx2 + (mx1 - sx2) * 0.5 + avg_rx * 0.035
-                qz2 = sz2 + (mz1 - sz2) * 0.5 + avg_rz * 0.035
                 # 端头横梁下探
                 drop1 = end_drop if not prev_valid else 0.0
-                poly = [(sx1, sy1 + y_off - drop1, sz1),
-                        (qx1, sy1 + y_off + 0.025, qz1),
-                        (mx1, sy1 + y_off - 0.01, mz1),
-                        (qx2, sy2 + y_off + 0.025, qz2),
-                        (sx2, sy2 + y_off, sz2)]
-                for a in range(4):
+                if curved:
+                    avg_rx = (rx1 + rx2) * 0.5
+                    avg_rz = (rz1 + rz2) * 0.5
+                    # 1/4 与 3/4 点折出 W 谷
+                    qx1 = sx1 + (mx1 - sx1) * 0.5 - avg_rx * 0.035
+                    qz1 = sz1 + (mz1 - sz1) * 0.5 - avg_rz * 0.035
+                    qx2 = sx2 + (mx1 - sx2) * 0.5 + avg_rx * 0.035
+                    qz2 = sz2 + (mz1 - sz2) * 0.5 + avg_rz * 0.035
+                    poly = [(sx1, sy1 + y_off - drop1, sz1),
+                            (qx1, sy1 + y_off + 0.025, qz1),
+                            (mx1, sy1 + y_off - 0.01, mz1),
+                            (qx2, sy2 + y_off + 0.025, qz2),
+                            (sx2, sy2 + y_off, sz2)]
+                else:
+                    # v6 直道 3 点平截面：W 波纹在长直道上毫无辨识度，
+                    # 双梁每段 48→24 顶点；中点分割保证 4m 跨度纵坡平滑
+                    poly = [(sx1, sy1 + y_off - drop1, sz1),
+                            (mx1, (sy1 + sy2) * 0.5 + y_off, mz1),
+                            (sx2, sy2 + y_off, sz2)]
+                for a in range(len(poly) - 1):
                     (x1b, y1b, z1b), (x2b, y2b, z2b) = poly[a], poly[a+1]
                     quad((x1b, y1b, z1b), (x2b, y2b, z2b),
                          (x2b, y2b + 0.32, z2b), (x1b, y1b + 0.32, z1b),
@@ -2443,7 +2478,8 @@ def _build_guardrails_impl():
 
             # ---- ★ 弯道护栏擦痕：轮胎刮掉镀锌层露出的灰白金属条 ----
             # 现实榛名山护栏外侧满是黑灰刮痕，是山路最有辨识度的"战损"细节。
-            if abs(curv[i]) > 0.008 and (i // 2) % 3 == 0:
+            # v6：节奏按段计数（弯道段 2m，seg_k%2 ≈ 4m 一候选，接近原 3m）
+            if abs(curv[i]) > 0.008 and seg_k % 2 == 0:
                 rnd = (math.sin(sx1 * 12.9898 + sz1 * 78.233 + 5.0) * 43758.5453)
                 rnd -= math.floor(rnd)
                 if rnd > 0.42:
@@ -2459,7 +2495,8 @@ def _build_guardrails_impl():
                             (-rx1, 0.0, -rz1), SCUFF)
 
             # ---- 轮廓标：仅弯道放置，右白左黄（★ 判据从 banking 改为曲率）----
-            if abs(curv[i]) > 0.006 and (i // 2) % 6 == 0:   # 约 6m 一根
+            # v6：弯道段 2m × seg_k%3 ≈ 6m 一根，与原节奏一致
+            if abs(curv[i]) > 0.006 and seg_k % 3 == 0:
                 rf_y = sy1 + GH * 0.5
                 rf_h = 0.05
                 # 右侧白色、左侧橙黄（日规：沿行车方向）
@@ -2476,6 +2513,12 @@ def _build_guardrails_impl():
                     [(0,0)]*4, rf_col)
 
             prev_valid = True
+            seg_k += 1
+            i = j
+
+        # ---- 路径末端收尾：本连续段未被豁口截断时，补最后一根末柱 ----
+        if prev_valid and last_end is not None:
+            _post(last_end[0], last_end[1], last_end[2])
 
     return np.array(verts, dtype=np.float32)
 

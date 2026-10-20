@@ -177,13 +177,13 @@ from mountain import (
 # ============================================================
 # HUD 界面模块（小地图等 2D 覆盖层）
 # ============================================================
-from hud import Minimap, UICoordSystem, TextRenderer, Speedometer, GearDisplay, MainMenu, SettingsPanel, destroy_shared_hud, CornerWarning
+from hud import Minimap, RotatingGPS, UICoordSystem, TextRenderer, Speedometer, GearDisplay, MainMenu, SettingsPanel, destroy_shared_hud, CornerWarning
 from corner_analyzer import CornerAnalyzer
 
 # ============================================================
 # 赛道边界防入侵系统（实时碰撞检测）
 # ============================================================
-from track_bounds import signed_distance, nearest_track_info, surface_height_at, build_height_field, build_triangle_index, gpu_height_init, gpu_height_query_batch
+from track_bounds import signed_distance, signed_distance_batch, nearest_track_info, surface_height_at, build_height_field, build_triangle_index, gpu_height_init, gpu_height_query_batch, road_curvature_at
 from physics_car import VehiclePhysics
 
 import json as _json
@@ -3622,7 +3622,7 @@ def build_car_groups():
         mapped.append((_map_group((v0, n0, uv0), up, up_min, up_max), g))
     xs_all = np.concatenate([m[0][0] for m in mapped])
     cur_w = float(xs_all.max() - xs_all.min())
-    _car_scale_factor = CAR_TARGET_WIDTH / max(cur_w, 1e-6) * 0.612  # ★ 整体缩小15%再缩20% → 0.68x；再缩10%→0.612x
+    _car_scale_factor = CAR_TARGET_WIDTH / max(cur_w, 1e-6) * 0.5508  # ★ 整体缩小15%→0.85x；再缩20%→0.68x；再缩10%→0.612x；再缩10%→0.5508
     print(f"  [GLB] 车宽 {cur_w:.2f} -> 目标 {CAR_TARGET_WIDTH} (x{_car_scale_factor:.2f})")
 
     out = []
@@ -5193,6 +5193,9 @@ def main():
     # ★ 头文字D 街机物理引擎（自行车模型 + Pacejka + 载荷转移 + 摩擦圆）
     phys = VehiclePhysics(start_x, start_z, car_angle)
     last_safe = [start_x, start_z, car_angle]  # NaN 保险丝：保存最近有效状态
+    # ★ T 键"回到起点"用的起始姿态（car_angle 在主循环里会被 phys.yaw 覆盖，
+    #   必须先另存一份，否则重置后车头朝向是上一次的残留值）
+    start_angle = car_angle
 
     # ---- 摄像机平滑跟踪 ----
     FOLLOW_RATE = 12.0     # 跟踪速率：越大跟得越紧
@@ -5253,7 +5256,10 @@ def main():
     # ============================================================
     print("初始化小地图...")
     akina_full_path = get_akina_path()
+    # ★ 全览小地图保持原位（左上角，固定朝向）。右上角另放旋转 GPS。
     minimap = Minimap(ui_coord, akina_full_path)
+    # 旋转 GPS（右上角，车头朝上）：看前方路线走向，与全览图互补
+    rotating_gps = RotatingGPS(ui_coord, akina_full_path)
 
     # ============================================================
     # 仪表盘（速度表 + 档位显示）初始化
@@ -5321,6 +5327,22 @@ def main():
                 elif event.key.keysym.sym == sdl2.SDLK_c:
                     _cam_adjust_mode = (_cam_adjust_mode + 1) % 3
                     print(f"[摄像机] 调节模式: {_cam_mode_names[_cam_adjust_mode]}")
+                # ★ T 键：一键回到山顶起点（重走下山路）
+                elif event.key.keysym.sym == sdl2.SDLK_t:
+                    if game_active:
+                        phys.set_state(start_x, start_z, start_angle)
+                        car_pos[0], car_pos[1], car_pos[2] = start_x, start_y, start_z
+                        car_angle = start_angle
+                        car_speed = 0.0
+                        last_safe[0] = start_x
+                        last_safe[1] = start_z
+                        last_safe[2] = start_angle
+                        # 相机：cam_pos 每帧由车体标架重算，但 cam_yaw 是带限幅的
+                        # 滞后跟踪状态 —— 不重置的话镜头会从半山腰"甩"回起点。
+                        cam_yaw = start_angle
+                        cam_roll = 0.0
+                        tire_marks.clear()
+                        print("[重置] 已回到山顶起点（T 键）")
             elif event.type == sdl2.SDL_MOUSEMOTION:
                 mx, my = event.motion.x, event.motion.y
                 if main_menu.is_active:
@@ -5385,9 +5407,15 @@ def main():
         h_rear  = surface_height_at(car_pos[0] + s_a_ * half_wb, car_pos[2] + c_a_ * half_wb)
         pitch_slope = _clamp((h_front - h_rear) / phys.wheelbase, -0.35, 0.35)
 
+        # ---- 道路曲率：漂移中路面的自然引导（正 = 右弯）----
+        #   ★ 物理层不依赖 corner_analyzer（它的最近点是 O(n) python 循环），
+        #     这里用 KDTree 查询后按参数注入，与 surface_mu / pitch_slope 同构。
+        road_kappa = road_curvature_at(phys.x, phys.z)
+
         # ---- 物理步进（120Hz 子步进解耦帧率） ----
         phys.update(dt, throttle, brake, steer_in, handbrake,
-                    surface_mu=surface_mu, pitch_slope=pitch_slope)
+                    surface_mu=surface_mu, pitch_slope=pitch_slope,
+                    road_kappa=road_kappa)
 
         # ---- ★ NaN 保险丝：任何发散在传播到 KD-tree 之前被截断 ----
         if not (math.isfinite(phys.x) and math.isfinite(phys.z)):
@@ -5414,35 +5442,49 @@ def main():
             return (gnx / _gl, gnz / _gl) if _gl > 1e-6 else (0.0, 0.0)
 
         s_w, c_w = math.sin(phys.yaw), math.cos(phys.yaw)
-        # ★ 四角检测：车尾/车侧插墙时法向力也能生效，不再只有中心+车头盲区
+        # ★ v4：6 探针批量检测（四角 + 车身中点补漏 + 车头楔入）。
+        #   短轴距车四角间距仅 ~2.8m，急弯小半径内侧护栏曲率大时车身中段
+        #   可能漏检 → 补中点探针。5+1 点一次 KDTree 批量查询，省 5 次
+        #   Python↔C 往返；_wall_normal 梯度只在最终 worst 角算 1 次
+        #   （旧版每次"更差角"都重算，穿透时最多 4 次 × 4 个 sd）。
         half_hw = phys.wheelbase * 0.5 * 0.5      # 横向半宽 ≈0.6m
         corners = [
             (-half_wb, -half_hw),   # 左前
             (-half_wb,  half_hw),   # 右前
             ( half_wb, -half_hw),   # 左后
             ( half_wb,  half_hw),   # 右后
+            ( 0.0,      0.0),       # ★ 车身中点（补漏探针，参与 worst 判定）
         ]
+        probe_pts = [
+            (phys.x + (-s_w * c_long) + (c_w * c_lat),
+             phys.z + (-c_w * c_long) + (-s_w * c_lat))
+            for c_long, c_lat in corners
+        ]
+        probe_pts.append((phys.x - s_w * half_wb,
+                          phys.z - c_w * half_wb))          # 车头（楔入检测）
+        _sds = signed_distance_batch(probe_pts)
+
         worst_pen = 0.0
-        worst_n = (0.0, 0.0)
-        for c_long, c_lat in corners:
-            # 车体系 → 世界：纵向 (-sin, -cos)，横向 (cos, -sin)
+        worst_pt = None
+        for (c_long, c_lat), sd_v in zip(corners, _sds[:5]):
             px = phys.x + (-s_w * c_long) + (c_w * c_lat)
             pz = phys.z + (-c_w * c_long) + (-s_w * c_lat)
             # ★ 起终点场地走廊内边界外推到建筑线（车能开上缓冲带）
-            d = signed_distance(px, pz) - venue_wall_margin(px, pz)
+            d = float(sd_v) - venue_wall_margin(px, pz)
             if d > worst_pen:
                 worst_pen = d
-                worst_n = _wall_normal(px, pz)
-        if worst_pen > 0.0 and (worst_n[0] != 0.0 or worst_n[1] != 0.0):
-            wall_impact = phys.wall_collide(
-                worst_n[0], worst_n[1], worst_pen, dt=dt)
+                worst_pt = (px, pz)
+        if worst_pen > 0.0 and worst_pt is not None:
+            worst_n = _wall_normal(worst_pt[0], worst_pt[1])
+            if worst_n[0] != 0.0 or worst_n[1] != 0.0:
+                wall_impact = phys.wall_collide(
+                    worst_n[0], worst_n[1], worst_pen, dt=dt)
 
         # 车头楔入检测补充：四角漏检但车头深插 → 对齐墙面（核心防卡死）
-        sd_front = signed_distance(phys.x - s_w * half_wb, phys.z - c_w * half_wb)
-        _fm = venue_wall_margin(phys.x - s_w * half_wb,
-                                phys.z - c_w * half_wb)
+        sd_front = float(_sds[5])
+        _fm = venue_wall_margin(probe_pts[5][0], probe_pts[5][1])
         if sd_front > _fm + 0.2:
-            nxf, nzf = _wall_normal(phys.x - s_w * half_wb, phys.z - c_w * half_wb)
+            nxf, nzf = _wall_normal(probe_pts[5][0], probe_pts[5][1])
             if nxf != 0.0 or nzf != 0.0:
                 wall_impact = max(wall_impact, phys.wall_nose_collide(
                     nxf, nzf, sd_front - _fm, dt=dt))
@@ -6799,6 +6841,9 @@ def main():
             if hud_cfg.get("show_minimap", True):
                 minimap.update_player(car_pos, car_angle)
                 minimap.render()
+                # ★ 旋转 GPS 与全览图同开关：车头朝上的局部导航视图
+                rotating_gps.update(car_pos[0], car_pos[2], car_angle)
+                rotating_gps.render()
 
             if hud_cfg.get("show_speedo", True):
                 glViewport(0, 0, ww, wh)
@@ -6863,6 +6908,7 @@ def main():
         if tex is not None:
             glDeleteTextures(1, [tex])
     minimap.destroy()
+    rotating_gps.destroy()
     gear_display.destroy()
     speedometer.destroy()
     corner_warning.destroy()

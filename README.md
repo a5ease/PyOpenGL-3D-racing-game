@@ -6,7 +6,7 @@ Realistic Haruna mountain pass racing simulation with PBR (Cook-Torrance) render
 
 基于榛名山真实地形的 3D 山路赛车模拟，使用 PBR Cook-Torrance 光照渲染，还原山路赛道场景与"沟渠跑法"物理。
 
-[![Release v1.0.1](https://img.shields.io/badge/Release-v1.0.1-brightgreen)](https://github.com/a5ease/PyOpenGL-3D-racing-game/releases/tag/v1.0.1)
+[![Release v1.0.2](https://img.shields.io/badge/Release-v1.0.2-brightgreen)](https://github.com/a5ease/PyOpenGL-3D-racing-game/releases/tag/v1.0.2)
 
 ---
 ## 📝 作者的话
@@ -96,6 +96,7 @@ python main.py
 | A / D 或 ← / → | 转向 |
 | C | 切换摄像机调节模式（距离/高度/预瞄） |
 | 滚轮 | 调节当前摄像机参数 |
+| T | 一键回到山顶起点（重走下山路） |
 | ESC | 暂停 / 返回主菜单 |
 | F | 切换全屏 |
 
@@ -114,6 +115,21 @@ python main.py
 - 🖼️ 截图归位至 `assets/screenshots/`，并同步修正 README 引用
 - 📦 放行打包配置 `*.spec` 与 `build_release.bat`，保证打包流程可复现
 - 📝 新增 `LICENSE`（非商业用途），明确授权范围
+
+### v1.0.2 · 修复+版
+> Release: [v1.0.2](https://github.com/a5ease/PyOpenGL-3D-racing-game/releases/tag/v1.0.2)
+
+**新增内容**
+- 🧭 小 GPS 地图 — 右上角旋转 GPS 局部导航，车头朝上，直观展示前方路线走向与弯道急缓
+- ⌨️ T 键重置 — 一键回到山顶起点，重走下山路
+
+**修复**
+- 🔧 修复车辆倒车无法自主回正的问题（倒车档位真实生效，停稳踩油可回前进挡）
+- 🔧 修复车辆小角度减速问题（漂移小角度允许净加速，不再结构性地掉速）
+
+**优化**
+- 🛡️ 优化护栏碰撞系统 — 真撞上提供封顶法向分离速度与转向自由度窗口，修复贴墙方向被锁死；墙壁检测升级为 6 探针批量检测
+- 🛠️ 优化护栏渲染 — 几何瘦身（~1.9M → ~0.4M 顶点），立柱动态间距、直道平截面，性能显著提升
 
 ---
 
